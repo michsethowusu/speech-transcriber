@@ -39,6 +39,10 @@ class SpeechTranscriberApp:
         self.current_sr = 44100
         self.playback_speed = 1.0
         self.pending_override = None
+        self.play_loop_count = 0
+        self.max_plays = 3
+        self.playback_after_id = None
+        self.countdown_after_id = None
 
         # Output Directories
         self.output_dir = Path("transcriptions")
@@ -110,6 +114,9 @@ class SpeechTranscriberApp:
 
         self.time_lbl = tk.Label(player_box, text="0.0s / 0.0s", font=("Courier", 10, "bold"), bg="#F1F5F9")
         self.time_lbl.pack(side=tk.LEFT, padx=4)
+
+        self.loop_status_lbl = tk.Label(player_box, text="", font=("Arial", 9, "bold"), bg="#F1F5F9", fg="#2563EB")
+        self.loop_status_lbl.pack(side=tk.LEFT, padx=12)
 
         # Speed Selector
         tk.Label(player_box, text="Speed:", font=("Arial", 9, "bold"), bg="#F1F5F9").pack(side=tk.RIGHT, padx=(4, 0))
@@ -257,12 +264,7 @@ class SpeechTranscriberApp:
     def _show_current_clip(self, autoplay=False):
         if not self.clips:
             return
-        try:
-            sd.stop()
-        except Exception:
-            pass
-        self.is_playing = False
-        self.play_btn.configure(text="▶ Play (Tab)")
+        self._stop_playback()
         self.warning_frame.pack_forget()
         self.pending_override = None
 
@@ -312,29 +314,95 @@ class SpeechTranscriberApp:
         self.export_btn.configure(state=tk.NORMAL if count > 0 else tk.DISABLED)
 
     # -------------------------------------------------------------
-    # PLAYBACK ENGINE
+    # PLAYBACK ENGINE (3-REPEAT WITH 3-SECOND COUNTDOWN BETWEEN PLAYS)
     # -------------------------------------------------------------
 
-    def toggle_playback(self):
+    def _stop_playback(self):
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        if self.playback_after_id:
+            try:
+                self.root.after_cancel(self.playback_after_id)
+            except Exception:
+                pass
+            self.playback_after_id = None
+        if self.countdown_after_id:
+            try:
+                self.root.after_cancel(self.countdown_after_id)
+            except Exception:
+                pass
+            self.countdown_after_id = None
+        self.is_playing = False
+        self.play_loop_count = 0
+        self.play_btn.configure(text="▶ Play (Tab)")
+        self.loop_status_lbl.configure(text="")
+
+    def toggle_playback(self, max_plays=3):
         if self.current_audio_data is None:
             return
         if self.is_playing:
-            sd.stop()
-            self.is_playing = False
-            self.play_btn.configure(text="▶ Play (Tab)")
+            self._stop_playback()
         else:
-            audio_to_play = self.current_audio_data
-            target_sr = int(self.current_sr * self.playback_speed)
-            sd.play(audio_to_play, target_sr)
             self.is_playing = True
+            self.play_loop_count = 0
+            self.max_plays = max_plays
             self.play_btn.configure(text="⏸ Pause (Tab)")
+            self._play_next_iteration()
+
+    def _play_next_iteration(self):
+        if not self.is_playing or self.current_audio_data is None:
+            return
+        self.play_loop_count += 1
+        self.loop_status_lbl.configure(
+            text=f"🔊 Playing take {self.play_loop_count} of {self.max_plays}...",
+            fg="#1D4ED8"
+        )
+        target_sr = int(self.current_sr * self.playback_speed)
+        try:
+            sd.play(self.current_audio_data, target_sr)
+        except Exception as e:
+            self._stop_playback()
+            return
+
+        dur_ms = int((len(self.current_audio_data) / target_sr) * 1000) + 80
+        self.playback_after_id = self.root.after(dur_ms, self._on_single_play_done)
+
+    def _on_single_play_done(self):
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        self.playback_after_id = None
+
+        if not self.is_playing:
+            return
+
+        if self.play_loop_count < self.max_plays:
+            # Start the 3-second countdown before playing again
+            self._start_countdown(3)
+        else:
+            # Finished all 3 repetitions
+            self._stop_playback()
+
+    def _start_countdown(self, seconds_left):
+        if not self.is_playing:
+            return
+        if seconds_left > 0:
+            next_take = self.play_loop_count + 1
+            self.loop_status_lbl.configure(
+                text=f"⏸ Playing again in {seconds_left}s... (Take {next_take} of {self.max_plays})",
+                fg="#D97706"
+            )
+            self.countdown_after_id = self.root.after(1000, lambda: self._start_countdown(seconds_left - 1))
+        else:
+            self.countdown_after_id = None
+            self._play_next_iteration()
 
     def rewind_audio(self):
-        if self.current_audio_data is None:
-            return
-        sd.stop()
-        self.is_playing = False
-        self.toggle_playback()
+        self._stop_playback()
+        self.toggle_playback(max_plays=3)
 
     def on_speed_change(self, event=None):
         val = self.speed_combo.get().replace("x", "")
