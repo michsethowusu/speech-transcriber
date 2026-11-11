@@ -254,7 +254,7 @@ class SpeechTranscriberApp:
         except Exception as e:
             print(f"Error loading transcripts: {e}")
 
-    def _show_current_clip(self):
+    def _show_current_clip(self, autoplay=False):
         if not self.clips:
             return
         try:
@@ -301,8 +301,9 @@ class SpeechTranscriberApp:
         # Focus text editor
         self.text_editor.focus_set()
 
-        # Auto-play audio clip
-        self.toggle_playback()
+        # Auto-play audio clip only when advancing to next
+        if autoplay:
+            self.toggle_playback()
 
     def _update_stats(self):
         count = len(self.transcripts_map)
@@ -393,7 +394,7 @@ class SpeechTranscriberApp:
 
         if self.current_index < len(self.clips) - 1:
             self.current_index += 1
-            self._show_current_clip()
+            self._show_current_clip(autoplay=True)
         else:
             messagebox.showinfo("Completed", "You have reached the end of the loaded audio batch!")
 
@@ -410,7 +411,7 @@ class SpeechTranscriberApp:
 
         if self.current_index < len(self.clips) - 1:
             self.current_index += 1
-            self._show_current_clip()
+            self._show_current_clip(autoplay=True)
         else:
             messagebox.showinfo("Completed", "You have reached the end of the loaded audio batch!")
 
