@@ -257,8 +257,10 @@ class SpeechTranscriberApp:
     def _show_current_clip(self):
         if not self.clips:
             return
-        if sd.get_stream():
+        try:
             sd.stop()
+        except Exception:
+            pass
         self.is_playing = False
         self.play_btn.configure(text="▶ Play (Tab)")
         self.warning_frame.pack_forget()
