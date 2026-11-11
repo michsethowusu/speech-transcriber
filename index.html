@@ -228,6 +228,42 @@
       color: var(--text);
     }
 
+    
+    /* Length Warning & Override Box */
+    .length-warning-card {
+      background: #FEF3C7;
+      border: 1.5px solid #F59E0B;
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      margin-bottom: 16px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      animation: fadeIn 0.3s ease;
+    }
+    .length-warning-card.active { display: flex; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .length-warning-title { font-size: 13.5px; font-weight: 800; color: #92400E; margin-bottom: 2px; }
+    .length-warning-desc { font-size: 12.5px; color: #78350F; }
+    .override-actions { display: flex; gap: 8px; align-items: center; }
+    .badge-review {
+      font-size: 11px;
+      font-weight: 700;
+      color: #92400E;
+      background: #FEF3C7;
+      border: 1px solid #FCD34D;
+      padding: 3px 8px;
+      border-radius: var(--radius-full);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
     /* Transcription Input */
     .input-label-row {
       display: flex;
@@ -377,6 +413,21 @@
         <span class="input-label">Transcription (Listen & Type / Correct)</span>
         <span style="font-size: 12px; color: var(--text-muted);" id="char-count">0 characters</span>
       </div>
+      
+      <!-- Length Warning & Override Card -->
+      <div class="length-warning-card" id="length-warning-card">
+        <div>
+          <div class="length-warning-title">⚠️ Length Warning</div>
+          <div class="length-warning-desc" id="length-warning-desc">Transcript text seems unusually short or long for this audio clip.</div>
+        </div>
+        <div class="override-actions">
+          <button type="button" class="btn" onclick="focusInput()">Review & Edit</button>
+          <button type="button" class="btn" style="background: #F59E0B; color: #FFF; border-color: #D97706; font-weight: 700;" onclick="confirmOverrideAndNext()">
+            ⚠️ Save & Mark for Review
+          </button>
+        </div>
+      </div>
+
       <textarea id="transcript-input" placeholder="Listen to the audio clip above and type the spoken text here..." oninput="handleTyping()"></textarea>
 
       <!-- Navigation & Action Buttons -->
@@ -402,6 +453,8 @@
     let clips = []; // { filename, blob, url, transcript, duration }
     let currentIndex = 0;
     let transcriptsMap = new Map(); // filename -> text
+    let transcriptStatusMap = new Map(); // filename -> status ('completed', 'needs_review_too_short', etc.)
+    let pendingOverride = null;
     const audioPlayer = document.getElementById("audio-player");
     const playPauseBtn = document.getElementById("play-pause-btn");
     const transcriptInput = document.getElementById("transcript-input");
@@ -436,7 +489,10 @@
         const req = store.getAll();
         req.onsuccess = () => {
           if (req.result && req.result.length > 0) {
-            req.result.forEach(r => transcriptsMap.set(r.filename, r.transcript));
+            req.result.forEach(r => {
+              transcriptsMap.set(r.filename, r.transcript);
+              transcriptStatusMap.set(r.filename, r.status || "completed");
+            });
             updateStats();
           }
           resolve();
@@ -445,13 +501,14 @@
       });
     }
 
-    function saveTranscriptToDB(filename, text) {
+    function saveTranscriptToDB(filename, text, status = "completed") {
       if (!db) return;
       try {
         const tx = db.transaction(STORE_NAME, "readwrite");
         tx.objectStore(STORE_NAME).put({
           filename: filename,
           transcript: text,
+          status: status,
           timestamp: new Date().toISOString()
         });
       } catch (e) {
@@ -605,8 +662,22 @@
       transcriptInput.value = savedText;
       updateCharCount();
 
+      hideLengthWarning();
       const badge = document.getElementById("completed-badge");
-      badge.style.display = (savedText.trim().length > 0) ? "inline" : "none";
+      const savedStatus = transcriptStatusMap.get(cur.filename) || "completed";
+      if (savedText.trim().length > 0) {
+        badge.style.display = "inline";
+        if (savedStatus.startsWith("needs_review")) {
+          badge.className = "badge-review";
+          badge.innerText = `⚠️ Review: ${savedStatus.replace('needs_review_', '')}`;
+        } else {
+          badge.className = "";
+          badge.style.color = "var(--success)";
+          badge.innerText = "✓ Transcribed";
+        }
+      } else {
+        badge.style.display = "none";
+      }
 
       // Focus input ready to type immediately
       setTimeout(() => transcriptInput.focus(), 50);
@@ -643,12 +714,73 @@
     function saveAndNext() {
       const text = transcriptInput.value.trim();
       const cur = clips[currentIndex];
-      if (text) {
-        transcriptsMap.set(cur.filename, text);
-        saveTranscriptToDB(cur.filename, text);
-      }
-      updateStats();
 
+      if (!text) {
+        showToast("Please enter transcript text before saving.");
+        return;
+      }
+
+      // Check length quality
+      const words = text.split(/\s+/).filter(w => w.length > 0);
+      const dur = audioPlayer.duration || 0;
+      let status = "completed";
+      let warnMessage = "";
+
+      // Too short: fewer than 3 words (or <8 chars) when audio is longer than 2.5 seconds
+      if (dur > 2.5 && (words.length < 3 || text.length < 8)) {
+        status = "needs_review_too_short";
+        warnMessage = `Transcript appears unusually short (${words.length} words for a ${dur.toFixed(1)}s audio clip). Did you transcribe all spoken words?`;
+      }
+      // Too long: word density > 4.5 words/second or over 65 words
+      else if ((dur > 0 && (words.length / dur) > 4.5) || words.length > 65) {
+        status = "needs_review_too_long";
+        warnMessage = `Transcript appears unusually long (${words.length} words for a ${dur.toFixed(1)}s audio clip). Please verify text matches the audio.`;
+      }
+
+      if (status !== "completed") {
+        // Show Warning with Override Option!
+        pendingOverride = { filename: cur.filename, text: text, status: status };
+        showLengthWarning(warnMessage);
+        return;
+      }
+
+      // Normal Pass: Commit immediately!
+      commitTranscript(cur.filename, text, "completed");
+      advanceToNextClip();
+    }
+
+    function showLengthWarning(msg) {
+      const card = document.getElementById("length-warning-card");
+      document.getElementById("length-warning-desc").innerText = msg;
+      card.classList.add("active");
+    }
+
+    function hideLengthWarning() {
+      document.getElementById("length-warning-card").classList.remove("active");
+      pendingOverride = null;
+    }
+
+    function focusInput() {
+      hideLengthWarning();
+      transcriptInput.focus();
+    }
+
+    function confirmOverrideAndNext() {
+      if (!pendingOverride) return;
+      commitTranscript(pendingOverride.filename, pendingOverride.text, pendingOverride.status);
+      hideLengthWarning();
+      showToast(`Transcript saved and marked as '${pendingOverride.status}'.`);
+      advanceToNextClip();
+    }
+
+    function commitTranscript(filename, text, status) {
+      transcriptsMap.set(filename, text);
+      transcriptStatusMap.set(filename, status);
+      saveTranscriptToDB(filename, text, status);
+      updateStats();
+    }
+
+    function advanceToNextClip() {
       if (currentIndex < clips.length - 1) {
         currentIndex++;
         showCurrentClip();
@@ -699,7 +831,10 @@
 
       for (const c of clips) {
         const text = transcriptsMap.get(c.filename) || "";
-        const status = text ? "completed" : "pending";
+        let status = "pending";
+        if (text) {
+          status = transcriptStatusMap.get(c.filename) || "completed";
+        }
         const escaped = `"${text.replace(/"/g, '""')}"`;
         const time = new Date().toISOString();
         csvContent += `${c.filename},${escaped},${status},${time},${volunteer}\n`;
